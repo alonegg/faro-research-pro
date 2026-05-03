@@ -1,0 +1,32 @@
+# `docker compose up --build` then open http://localhost:5174
+# (port 5174 to avoid clashing with OSS Faro on 5173 when both run side-by-side)
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    env_file: .env
+    environment:
+      FARO_DB_PATH: /app/data/faro.db
+      FARO_CORS_ORIGINS: http://localhost:5174
+    volumes:
+      - ./data:/app/data
+    expose:
+      - "8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; r=httpx.get('http://localhost:8000/api/health'); r.raise_for_status()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.web
+    depends_on:
+      - backend
+    ports:
+      - "5174:80"
+    restart: unless-stopped

@@ -1,0 +1,67 @@
+[project]
+name = "faro-research-pro"
+version = "0.5.0"
+description = "Multi-agent collaboration + branded report exports for Faro Research. AGPL-3.0."
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "Faro Research Pro contributors" }]
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["llm", "agent", "tushare", "a-share", "research", "multi-agent", "pdf"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+# Hard dependency on the MIT core. Pro extends, never re-implements.
+dependencies = [
+    "faro-research>=0.4.0",
+    "xhtml2pdf>=0.2.16",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+]
+dev = [
+    "ruff>=0.7",
+    "pytest>=8.3",
+]
+
+[project.scripts]
+faro-pro = "faro_research_pro.cli:main"
+
+[project.entry-points."faro_research.tools"]
+# Pro registers no extra tools by default; reserved for v0.6.
+
+[project.urls]
+Homepage = "https://github.com/alonegg/faro-research-pro"
+"OSS Core" = "https://github.com/alonegg/faro-research"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["faro_research_pro"]
+
+[tool.hatch.build]
+include = [
+    "faro_research_pro/**/*.py",
+    "faro_research_pro/exports/assets/*.svg",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"faro_research_pro/server.py" = ["B008"]   # FastAPI Depends() in defaults
