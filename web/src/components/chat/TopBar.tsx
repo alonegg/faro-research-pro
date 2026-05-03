@@ -9,9 +9,10 @@ interface TopBarProps {
   me: MeResponse | null;
   collabMode: boolean;
   onToggleCollab: (on: boolean) => void;
+  onOpenSettings: () => void;
 }
 
-export function TopBar({ info, me, collabMode, onToggleCollab }: TopBarProps) {
+export function TopBar({ info, me, collabMode, onToggleCollab, onOpenSettings }: TopBarProps) {
   return (
     <header className="topbar">
       <span className="topbar__title">A 股研究助手 PRO</span>
@@ -26,6 +27,13 @@ export function TopBar({ info, me, collabMode, onToggleCollab }: TopBarProps) {
           {info.auth_required ? ` · ${me?.email ?? "?"}` : ""}
         </span>
       )}
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={onOpenSettings}
+        title="设置"
+      >⚙</Button>
+
       {info?.auth_required && me && (
         <Button
           variant="ghost"

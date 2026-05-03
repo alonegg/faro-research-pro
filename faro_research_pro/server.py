@@ -40,7 +40,9 @@ from fastapi.responses import Response, StreamingResponse
 from faro_research_pro import __version__ as pro_version
 from faro_research_pro.agents import stream_collab
 from faro_research_pro.exports import BrandConfig, branded_markdown_to_pdf
-from faro_research_pro.storage import metadata_store
+from faro_research_pro.storage import (
+    SETTINGS_DEFAULTS, metadata_store, settings_store,
+)
 
 log = logging.getLogger(__name__)
 
@@ -202,6 +204,17 @@ def make_app():
         memory = MemoryStore(root=settings.db_path.parent / "memory" / user.id)
         reg = ToolRegistry()
         reg.register_many(tushare_default_tools(provider))
+        # ── Pro: US stocks (FD.ai) + cross-market peer lookup ────────
+        try:
+            from faro_research_pro.tools.us_stocks import US_TOOLS
+            reg.register_many(US_TOOLS)
+        except Exception as e:
+            log.warning("us_stocks tools failed to load: %s", e)
+        try:
+            from faro_research_pro.tools.cross_market import CROSS_MARKET_TOOLS
+            reg.register_many(CROSS_MARKET_TOOLS)
+        except Exception as e:
+            log.warning("cross_market tools failed to load: %s", e)
         skill = make_skill_tool()
         if skill is not None:
             reg.register(skill)
@@ -458,7 +471,199 @@ def make_app():
         s = store.get_session(session_id)
         return _serialize(s, meta.get(session_id))
 
+    # ── Settings: runtime-configurable values (UI editable) ──────────
+    psettings = settings_store()
+
+    @app.get("/api/pro/settings")
+    def get_settings(
+        user: User = Depends(_current_user_dep),
+    ) -> dict:
+        """All runtime settings (defaults merged with stored overrides)."""
+        return psettings.all()
+
+    @app.patch("/api/pro/settings")
+    def patch_settings(
+        body: dict = Body(...),
+        user: User = Depends(_current_user_dep),
+    ) -> dict:
+        """Apply many key/value updates atomically. Returns the new state."""
+        # Filter to known keys to prevent garbage in DB.
+        known = set(SETTINGS_DEFAULTS.keys())
+        clean = {k: v for k, v in (body or {}).items() if k in known}
+        if not clean:
+            raise HTTPException(400, "no valid settings keys in body")
+        return psettings.patch(clean)
+
+    @app.get("/api/pro/settings/status")
+    def settings_status(
+        user: User = Depends(_current_user_dep),
+    ) -> dict:
+        """Read-only snapshot for the Settings UI: env-driven config + counts.
+        Mask secrets — return only the last 4 chars."""
+        def mask(v: str) -> str:
+            if not v: return ""
+            return ("•" * max(0, len(v) - 4)) + v[-4:] if len(v) > 4 else "•" * len(v)
+        # Memory + skills counts (best-effort)
+        try:
+            from faro_research.memory import MemoryStore
+            mem = MemoryStore(root=faro_settings_module().db_path.parent / "memory" / user.id)
+            soul = mem.soul() or ""
+            rules = mem.rules() or ""
+            mem_count = len(mem.list_recent(limit=200) or [])
+        except Exception:
+            soul, rules, mem_count = "", "", 0
+        # Skills count
+        try:
+            from faro_research.skills import list_skills
+            skills = list_skills() or []
+        except Exception:
+            skills = []
+        # Tool count
+        from faro_research.tools.builtin.tushare import tushare_default_tools
+        tushare_count = len(tushare_default_tools(provider))
+        return {
+            "llm_main": {
+                "provider": os.getenv("FARO_PROVIDER", "openai_compat"),
+                "base_url": os.getenv("FARO_OPENAI_BASE_URL", ""),
+                "api_key_masked": mask(os.getenv("FARO_OPENAI_API_KEY", "")),
+                "model": os.getenv("FARO_OPENAI_MODEL", ""),
+                "timeout_sec": int(os.getenv("FARO_LLM_TIMEOUT_SEC", "180")),
+            },
+            "llm_small": {
+                "configured": small_provider is not None,
+                "base_url": os.getenv("FARO_PRO_SMALL_LLM_BASE_URL", ""),
+                "api_key_masked": mask(os.getenv("FARO_PRO_SMALL_LLM_API_KEY", "")),
+                "model": os.getenv("FARO_PRO_SMALL_LLM_MODEL", ""),
+            },
+            "data_sources": {
+                "tushare": {
+                    "token_masked": mask(os.getenv("TUSHARE_TOKEN", "")),
+                    "tools_loaded": tushare_count,
+                },
+                "fd_ai": {
+                    "key_masked": mask(os.getenv("FINANCIAL_DATASETS_API_KEY", "")),
+                    "configured": bool(os.getenv("FINANCIAL_DATASETS_API_KEY", "")),
+                },
+                "akshare": {
+                    "available": _check_akshare(),
+                },
+            },
+            "agent": {
+                "max_tool_turns": int(os.getenv("FARO_MAX_TOOL_TURNS", "8")),
+                "tool_result_max_chars": int(os.getenv("FARO_TOOL_RESULT_MAX_CHARS", "3500")),
+            },
+            "auth": {
+                "required": _auth_required(),
+                "current_user": {"id": user.id, "email": user.email, "role": user.role},
+            },
+            "audit": {
+                "db_path": str(faro_settings_module().db_path),
+            },
+            "memory": {
+                "soul": soul,
+                "rules": rules,
+                "count": mem_count,
+            },
+            "skills": [{"name": s.name, "description": s.description[:120]} for s in skills],
+            "version": {"pro": pro_version, "oss": oss_version},
+        }
+
+    @app.put("/api/pro/settings/memory")
+    def update_memory(
+        body: dict = Body(...),
+        user: User = Depends(_current_user_dep),
+    ) -> dict:
+        """Update memory soul/rules text."""
+        from faro_research.memory import MemoryStore
+        mem = MemoryStore(root=faro_settings_module().db_path.parent / "memory" / user.id)
+        if "soul" in body:
+            mem.set_soul(str(body["soul"] or ""))
+        if "rules" in body:
+            mem.set_rules(str(body["rules"] or ""))
+        return {"soul": mem.soul() or "", "rules": mem.rules() or ""}
+
+    @app.post("/api/pro/settings/test/{kind}")
+    def test_connection(
+        kind: str,
+        user: User = Depends(_current_user_dep),
+    ) -> dict:
+        """Quick connectivity test. Kind: llm_main / llm_small / tushare / fd_ai."""
+        import time
+        t0 = time.perf_counter()
+        try:
+            if kind == "llm_main":
+                resp = provider.chat(
+                    [Message(role="user", content="reply with 'ok' only")],
+                    temperature=0.0, max_tokens=8,
+                )
+                ok = bool(resp.content)
+                detail = (resp.content or "")[:80]
+            elif kind == "llm_small":
+                if small_provider is None:
+                    return {"ok": False, "detail": "small LLM not configured (FARO_PRO_SMALL_LLM_* env)"}
+                resp = small_provider.chat(
+                    [Message(role="user", content="reply with 'ok' only")],
+                    temperature=0.0, max_tokens=8,
+                )
+                ok = bool(resp.content)
+                detail = (resp.content or "")[:80]
+            elif kind == "tushare":
+                from faro_research.tools.builtin.tushare import client as ts
+                rows = ts.stock_basic(force_refresh=False)
+                ok = isinstance(rows, list) and len(rows) > 100
+                detail = f"loaded {len(rows)} A-share rows"
+            elif kind == "fd_ai":
+                import httpx
+                key = os.getenv("FINANCIAL_DATASETS_API_KEY", "")
+                if not key:
+                    return {"ok": False, "detail": "FINANCIAL_DATASETS_API_KEY not set"}
+                r = httpx.get(
+                    "https://api.financialdatasets.ai/prices/snapshot/",
+                    params={"ticker": "AAPL"},
+                    headers={"X-API-KEY": key},
+                    timeout=10.0,
+                )
+                ok = r.status_code == 200
+                detail = f"HTTP {r.status_code}; body[:120]={r.text[:120]}"
+            else:
+                raise HTTPException(400, f"unknown test kind: {kind}")
+            return {"ok": ok, "detail": detail, "latency_ms": (time.perf_counter() - t0) * 1000}
+        except Exception as e:
+            return {"ok": False, "detail": f"{type(e).__name__}: {str(e)[:200]}",
+                    "latency_ms": (time.perf_counter() - t0) * 1000}
+
+    @app.post("/api/pro/settings/purge_all_sessions")
+    def purge_all(
+        user: User = Depends(_current_user_dep),
+    ) -> dict:
+        """Hard delete every session belonging to the current user.
+        Frontend MUST double-confirm before calling this."""
+        sessions = store.list_sessions(limit=10000, user_id=user.id)
+        purged = 0
+        for s in sessions:
+            try:
+                meta.purge(s.id)
+                store.delete_session(s.id)
+                purged += 1
+            except Exception:
+                pass
+        return {"purged": purged}
+
     return app
+
+
+def _check_akshare() -> bool:
+    try:
+        import akshare  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def faro_settings_module():
+    """Lazy import to avoid circular at module load."""
+    from faro_research.config import settings as s
+    return s
 
 
 # Convenience singleton

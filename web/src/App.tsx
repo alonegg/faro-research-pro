@@ -4,7 +4,7 @@
  *  each piece to a primitive (Sidebar / TopBar / Thread / Composer).
  *  Global keyboard shortcuts (⌘K / ⌘\ / ⌘N) are wired here. */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Composer } from "./components/chat/Composer";
 import { EmptyState } from "./components/chat/EmptyState";
@@ -12,6 +12,7 @@ import { PersistedMessageView, TurnView } from "./components/chat/Message";
 import { Sidebar } from "./components/chat/Sidebar";
 import { Thread } from "./components/chat/Thread";
 import { TopBar } from "./components/chat/TopBar";
+import { SettingsModal } from "./components/settings/SettingsModal";
 import { AuthGate } from "./components/ui/AuthGate";
 import { cn } from "./lib/cn";
 import { useChatStore } from "./state/useChatStore";
@@ -27,6 +28,7 @@ const SUGGESTIONS = [
 export function App() {
   const s = useChatStore();
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Global shortcuts: ⌘K (search), ⌘\ (collapse), ⌘N (new session)
   useEffect(() => {
@@ -91,6 +93,7 @@ export function App() {
           me={s.me}
           collabMode={s.collabMode}
           onToggleCollab={s.setCollabMode}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
 
         <Thread scrollKey={[s.history.length, s.turns]}>
@@ -117,6 +120,8 @@ export function App() {
 
         <Composer running={s.running} onSubmit={s.submit} />
       </div>
+
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

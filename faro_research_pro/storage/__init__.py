@@ -11,5 +11,15 @@ from .metadata import (
     SessionMetadataStore,
     metadata_store,
 )
+from .settings import (
+    DEFAULTS as SETTINGS_DEFAULTS,
+    ProSetting,
+    ProSettingsStore,
+    settings_store,
+)
 
-__all__ = ["SessionMetadata", "SessionMetadataStore", "metadata_store"]
+__all__ = [
+    "SessionMetadata", "SessionMetadataStore", "metadata_store",
+    "ProSetting", "ProSettingsStore", "settings_store",
+    "SETTINGS_DEFAULTS",
+]

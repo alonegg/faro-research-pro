@@ -43,6 +43,23 @@ export interface ToolInfo {
   parameters: Record<string, unknown>;
 }
 
+// Settings
+export interface SettingsStatus {
+  llm_main: { provider: string; base_url: string; api_key_masked: string; model: string; timeout_sec: number };
+  llm_small: { configured: boolean; base_url: string; api_key_masked: string; model: string };
+  data_sources: {
+    tushare: { token_masked: string; tools_loaded: number };
+    fd_ai: { key_masked: string; configured: boolean };
+    akshare: { available: boolean };
+  };
+  agent: { max_tool_turns: number; tool_result_max_chars: number };
+  auth: { required: boolean; current_user: { id: string; email: string; role: string } };
+  audit: { db_path: string };
+  memory: { soul: string; rules: string; count: number };
+  skills: { name: string; description: string }[];
+  version: { pro: string; oss: string };
+}
+
 // API key persisted in localStorage; sent as Bearer on every request.
 // In auth-disabled deployments (FARO_AUTH_REQUIRED unset on backend) the
 // header is ignored; in auth-required deployments, missing/invalid → 401.
@@ -160,6 +177,34 @@ export const api = {
       `/pro/sessions/${id}/auto-title`,
       {},
     ),
+  // ── Settings ────────────────────────────────────────────────────────
+  getSettings: () => jget<Record<string, unknown>>("/pro/settings"),
+  patchSettings: (updates: Record<string, unknown>) =>
+    fetch(`/api/pro/settings`, {
+      method: "PATCH",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify(updates),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+      return r.json() as Promise<Record<string, unknown>>;
+    }),
+  getSettingsStatus: () => jget<SettingsStatus>("/pro/settings/status"),
+  updateMemory: (soul: string, rules: string) =>
+    fetch(`/api/pro/settings/memory`, {
+      method: "PUT",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ soul, rules }),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+      return r.json() as Promise<{ soul: string; rules: string }>;
+    }),
+  testConnection: (kind: "llm_main" | "llm_small" | "tushare" | "fd_ai") =>
+    jpost<{ ok: boolean; detail: string; latency_ms: number }>(
+      `/pro/settings/test/${kind}`,
+      {},
+    ),
+  purgeAllSessions: () =>
+    jpost<{ purged: number }>(`/pro/settings/purge_all_sessions`, {}),
   /** Triggers a browser download. Returns the URL we'd hit (useful for a tags). */
   exportUrl: (id: string, fmt: "md" | "pdf") => `/api/sessions/${id}/export.${fmt}`,
   download: async (id: string, fmt: "md" | "pdf") => {
