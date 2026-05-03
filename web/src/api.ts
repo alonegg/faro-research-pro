@@ -5,6 +5,12 @@ export interface SessionMeta {
   title: string;
   created_at: string;
   updated_at: string;
+  // Pro extensions (present on /api/pro/sessions endpoints)
+  pinned?: boolean;
+  pinned_at?: string | null;
+  tags?: string[];
+  deleted_at?: string | null;
+  auto_titled?: boolean;
 }
 
 export interface PersistedMessage {
@@ -92,7 +98,17 @@ export const api = {
   health: () => jget<HealthResponse>("/health"),
   me: () => jget<MeResponse>("/auth/me"),
   tools: () => jget<ToolInfo[]>("/tools"),
-  listSessions: () => jget<SessionMeta[]>("/sessions"),
+  // Pro list — returns OSS sessions joined with Pro metadata; default
+  // excludes soft-deleted. Falls back to OSS for older deployments.
+  listSessions: async () => {
+    try {
+      return await jget<SessionMeta[]>("/pro/sessions");
+    } catch {
+      return await jget<SessionMeta[]>("/sessions");
+    }
+  },
+  listDeletedSessions: () =>
+    jget<SessionMeta[]>("/pro/sessions?only_deleted=true"),
   createSession: (title?: string) => jpost<SessionMeta>("/sessions", { title }),
   getSession: (id: string) =>
     jget<{ session: SessionMeta; messages: PersistedMessage[] }>(`/sessions/${id}`),
@@ -105,12 +121,45 @@ export const api = {
       if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
       return r.json() as Promise<SessionMeta>;
     }),
+  // Pro: soft-delete by default. Old `deleteSession` callers go through
+  // here too — they were never expecting permanent deletion anyway.
   deleteSession: (id: string) =>
-    fetch(`/api/sessions/${id}`, { method: "DELETE", headers: authHeaders() })
+    fetch(`/api/pro/sessions/${id}`, { method: "DELETE", headers: authHeaders() })
       .then(async (r) => {
         if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
         return r.json();
       }),
+  restoreSession: (id: string) =>
+    jpost<SessionMeta>(`/pro/sessions/${id}/restore`, {}),
+  purgeSession: (id: string) =>
+    fetch(`/api/pro/sessions/${id}/purge`, { method: "DELETE", headers: authHeaders() })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+        return r.json();
+      }),
+  setPinned: (id: string, pinned: boolean) =>
+    fetch(`/api/pro/sessions/${id}/metadata`, {
+      method: "PATCH",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ pinned }),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+      return r.json() as Promise<SessionMeta>;
+    }),
+  setTags: (id: string, tags: string[]) =>
+    fetch(`/api/pro/sessions/${id}/metadata`, {
+      method: "PATCH",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ tags }),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+      return r.json() as Promise<SessionMeta>;
+    }),
+  autoTitle: (id: string) =>
+    jpost<SessionMeta & { skipped?: string }>(
+      `/pro/sessions/${id}/auto-title`,
+      {},
+    ),
   /** Triggers a browser download. Returns the URL we'd hit (useful for a tags). */
   exportUrl: (id: string, fmt: "md" | "pdf") => `/api/sessions/${id}/export.${fmt}`,
   download: async (id: string, fmt: "md" | "pdf") => {

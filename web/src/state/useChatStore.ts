@@ -1,26 +1,23 @@
 /** Single source of truth for chat state — sessions, turns, history, auth.
  *
- *  Why one big hook instead of context+reducer/zustand: the surface is small
- *  enough (one screen) that an extra abstraction layer hurts more than helps,
- *  and React Strict Mode's double-invocation lays nicely on plain useState.
- *
  *  Critical invariants (don't break these):
  *
  *    A. Wipe-race fix — when submit() lazily creates a session, setActiveId
  *       fires the load-history effect; that effect must NOT clear `turns` or
- *       the freshly-inserted pending turn vanishes (commit a7ad6ad). We track
- *       `lastLoadedSession` in a ref so only real switches clear turns.
+ *       the freshly-inserted pending turn vanishes (commit a7ad6ad).
  *
  *    B. Session-tagged turns — every UITurn carries `sessionId`. Late stream
  *       events after the user switches away are ignored (so a slow Researcher
  *       can't paint into the wrong thread).
  *
  *    C. AbortController on switch — switching sessions mid-stream cancels
- *       the in-flight fetch so the new session's input doesn't stay disabled
- *       and the wrong session doesn't keep mutating.
+ *       the in-flight fetch.
+ *
+ *    D. Auto-title trigger — fires once per session, only when the FIRST
+ *       turn in that session finishes successfully and title is still default.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   api,
@@ -32,8 +29,12 @@ import {
 } from "../api";
 import type { ServerInfo, UITurn } from "./types";
 
+const COLLAPSED_KEY = "faro_pro_sidebar_collapsed";
+const COLLAB_KEY = "faro_pro_collab";
+
 export function useChatStore() {
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
+  const [deletedSessions, setDeletedSessions] = useState<SessionMeta[]>([]);
   const [activeId, _setActiveId] = useState<string | null>(null);
   const [history, setHistory] = useState<PersistedMessage[]>([]);
   const [turns, setTurns] = useState<UITurn[]>([]);
@@ -42,21 +43,36 @@ export function useChatStore() {
   const [me, setMe] = useState<MeResponse | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [collabMode, setCollabModeState] = useState<boolean>(
-    () => localStorage.getItem("faro_pro_collab") === "1",
+    () => localStorage.getItem(COLLAB_KEY) === "1",
   );
+  const [sidebarCollapsed, setSidebarCollapsedState] = useState<boolean>(
+    () => localStorage.getItem(COLLAPSED_KEY) === "1",
+  );
+  const [searchQuery, setSearchQuery] = useState("");
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
 
   const nextTurnId = useRef(1);
   const tickRef = useRef<number | null>(null);
   const lastLoadedSession = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Sessions where the next done-turn should trigger auto-title.
+  // (Set when ensureSession lazily creates a new session in submit.)
+  const pendingAutoTitle = useRef<Set<string>>(new Set());
 
-  // ── persist collab toggle ───────────────────────────────────────────
+  // ── persisted toggles ───────────────────────────────────────────────
   const setCollabMode = useCallback((on: boolean) => {
     setCollabModeState(on);
-    localStorage.setItem("faro_pro_collab", on ? "1" : "0");
+    localStorage.setItem(COLLAB_KEY, on ? "1" : "0");
   }, []);
+  const setSidebarCollapsed = useCallback((on: boolean) => {
+    setSidebarCollapsedState(on);
+    localStorage.setItem(COLLAPSED_KEY, on ? "1" : "0");
+  }, []);
+  const toggleSidebarCollapsed = useCallback(() => {
+    setSidebarCollapsed(!sidebarCollapsed);
+  }, [sidebarCollapsed, setSidebarCollapsed]);
 
-  // ── boot: health → auth → list sessions ─────────────────────────────
+  // ── boot ────────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -87,8 +103,6 @@ export function useChatStore() {
   }, []);
 
   // ── load active session messages ─────────────────────────────────────
-  // Invariant A: only wipe `turns` when the user is *switching* sessions,
-  // never when activeId first becomes set inside the same submit() call.
   useEffect(() => {
     if (!activeId) {
       setHistory([]);
@@ -106,7 +120,7 @@ export function useChatStore() {
     }).catch(() => {});
   }, [activeId]);
 
-  // ── elapsed-time tick on the pending turn ───────────────────────────
+  // ── elapsed-time tick ───────────────────────────────────────────────
   useEffect(() => {
     const pending = turns.find((t) => t.status === "pending");
     if (!pending) {
@@ -146,6 +160,20 @@ export function useChatStore() {
     });
   }, []);
 
+  const refreshSessions = useCallback(async () => {
+    try {
+      const ss = await api.listSessions();
+      setSessions(ss);
+    } catch {/* ignore */}
+  }, []);
+
+  const refreshDeleted = useCallback(async () => {
+    try {
+      const ds = await api.listDeletedSessions();
+      setDeletedSessions(ds);
+    } catch {/* ignore */}
+  }, []);
+
   // ── new session ─────────────────────────────────────────────────────
   const newSession = useCallback(async () => {
     try {
@@ -157,21 +185,16 @@ export function useChatStore() {
     }
   }, [setActiveId]);
 
-  // submit may be called from the empty state (activeId === null), in
-  // which case we lazily create a session and immediately use its id —
-  // do NOT wait for setActiveId's render cycle.
-  const ensureSession = useCallback(async (): Promise<string> => {
-    if (activeId) return activeId;
+  const ensureSession = useCallback(async (): Promise<{ sid: string; isNew: boolean }> => {
+    if (activeId) return { sid: activeId, isNew: false };
     const s = await api.createSession();
     setSessions((prev) => [s, ...prev]);
-    // Bump the ref BEFORE setActiveId so the load-history effect's
-    // `switched` check sees no real switch.
     lastLoadedSession.current = s.id;
     _setActiveId(s.id);
-    return s.id;
+    return { sid: s.id, isNew: true };
   }, [activeId]);
 
-  // ── delete / rename ─────────────────────────────────────────────────
+  // ── delete / rename / restore / purge ────────────────────────────────
   const deleteSession = useCallback((id: string) => {
     toast(`删除这个会话?`, {
       action: {
@@ -181,7 +204,21 @@ export function useChatStore() {
             await api.deleteSession(id);
             setSessions((prev) => prev.filter((s) => s.id !== id));
             if (activeId === id) setActiveId(null);
-            toast.success("已删除");
+            toast.success("已移到回收站", {
+              action: {
+                label: "撤销",
+                onClick: async () => {
+                  try {
+                    const restored = await api.restoreSession(id);
+                    setSessions((prev) => [restored, ...prev]);
+                    toast.success("已还原");
+                  } catch (e) {
+                    toast.error(`还原失败: ${e}`);
+                  }
+                },
+              },
+              duration: 8000,
+            });
           } catch (e) {
             toast.error(`删除失败: ${e}`);
           }
@@ -196,10 +233,79 @@ export function useChatStore() {
     if (!trimmed) return;
     try {
       const updated = await api.rename(id, trimmed);
-      setSessions((prev) => prev.map((s) => (s.id === id ? updated : s)));
+      setSessions((prev) => prev.map((s) =>
+        s.id === id ? { ...s, ...updated } : s,
+      ));
     } catch (e) {
       toast.error(`重命名失败: ${e}`);
     }
+  }, []);
+
+  const restoreSession = useCallback(async (id: string) => {
+    try {
+      const restored = await api.restoreSession(id);
+      setDeletedSessions((prev) => prev.filter((s) => s.id !== id));
+      setSessions((prev) => [restored, ...prev]);
+      toast.success("已还原");
+    } catch (e) {
+      toast.error(`还原失败: ${e}`);
+    }
+  }, []);
+
+  const purgeSession = useCallback((id: string) => {
+    toast("永久删除? 不可恢复", {
+      action: {
+        label: "永久删除",
+        onClick: async () => {
+          try {
+            await api.purgeSession(id);
+            setDeletedSessions((prev) => prev.filter((s) => s.id !== id));
+            toast.success("已永久删除");
+          } catch (e) {
+            toast.error(`删除失败: ${e}`);
+          }
+        },
+      },
+      duration: 6000,
+    });
+  }, []);
+
+  // ── pin / tags ──────────────────────────────────────────────────────
+  const setPinned = useCallback(async (id: string, pinned: boolean) => {
+    // Optimistic update.
+    setSessions((prev) => prev.map((s) =>
+      s.id === id ? { ...s, pinned, pinned_at: pinned ? new Date().toISOString() : null } : s,
+    ));
+    try {
+      await api.setPinned(id, pinned);
+    } catch (e) {
+      toast.error(`${pinned ? "置顶" : "取消置顶"}失败: ${e}`);
+      refreshSessions();
+    }
+  }, [refreshSessions]);
+
+  const setTags = useCallback(async (id: string, tags: string[]) => {
+    setSessions((prev) => prev.map((s) =>
+      s.id === id ? { ...s, tags } : s,
+    ));
+    try {
+      await api.setTags(id, tags);
+    } catch (e) {
+      toast.error(`修改标签失败: ${e}`);
+      refreshSessions();
+    }
+  }, [refreshSessions]);
+
+  // ── auto-title trigger ──────────────────────────────────────────────
+  const tryAutoTitle = useCallback(async (sessionId: string) => {
+    if (!pendingAutoTitle.current.has(sessionId)) return;
+    pendingAutoTitle.current.delete(sessionId);
+    try {
+      const updated = await api.autoTitle(sessionId);
+      setSessions((prev) => prev.map((s) =>
+        s.id === sessionId ? { ...s, ...updated, auto_titled: true } : s,
+      ));
+    } catch {/* silent; not critical */}
   }, []);
 
   // ── stream event reducer ────────────────────────────────────────────
@@ -212,12 +318,7 @@ export function useChatStore() {
             ...t,
             liveTools: [
               ...t.liveTools,
-              {
-                tool_call_id: ev.tool_call_id,
-                name: ev.name,
-                args: ev.args,
-                status: "running",
-              },
+              { tool_call_id: ev.tool_call_id, name: ev.name, args: ev.args, status: "running" },
             ],
           };
         }
@@ -226,23 +327,12 @@ export function useChatStore() {
             ...t,
             liveTools: t.liveTools.map((lt) =>
               lt.tool_call_id === ev.tool_call_id
-                ? {
-                  ...lt,
-                  latency_ms: ev.latency_ms,
-                  error: ev.error,
-                  status: "done",
-                } : lt,
+                ? { ...lt, latency_ms: ev.latency_ms, error: ev.error, status: "done" } : lt,
             ),
           };
         }
         if (ev.type === "phase_start") {
-          return {
-            ...t,
-            phases: [
-              ...t.phases,
-              { phase: ev.phase, round: ev.round, status: "running" },
-            ],
-          };
+          return { ...t, phases: [...t.phases, { phase: ev.phase, round: ev.round, status: "running" }] };
         }
         if (ev.type === "phase_done") {
           return {
@@ -257,11 +347,8 @@ export function useChatStore() {
           return {
             ...t,
             reviews: [...t.reviews, {
-              round: ev.round,
-              verdict: ev.verdict,
-              score: ev.score,
-              summary: ev.summary,
-              issues: ev.issues,
+              round: ev.round, verdict: ev.verdict, score: ev.score,
+              summary: ev.summary, issues: ev.issues,
             }],
           };
         }
@@ -292,39 +379,33 @@ export function useChatStore() {
     setRunning(true);
 
     let sid: string;
+    let isNew = false;
     try {
-      sid = await ensureSession();
+      const r = await ensureSession();
+      sid = r.sid; isNew = r.isNew;
     } catch (e) {
       setRunning(false);
       toast.error(`新建会话失败: ${e}`);
       return;
     }
 
+    // Mark this session as eligible for auto-title (one-shot per session).
+    if (isNew) pendingAutoTitle.current.add(sid);
+
     const id = nextTurnId.current++;
     setTurns((prev) => [...prev, {
-      id,
-      query,
-      status: "pending",
-      liveTools: [],
-      elapsedMs: 0,
-      collab: collabMode,
-      phases: [],
-      reviews: [],
-      sessionId: sid,
+      id, query, status: "pending", liveTools: [], elapsedMs: 0,
+      collab: collabMode, phases: [], reviews: [], sessionId: sid,
     }]);
 
     const controller = new AbortController();
     abortRef.current = controller;
     try {
       await askStream(
-        sid,
-        query,
-        (ev) => onEvent(id, ev),
-        controller.signal,
-        collabMode ? "collab" : "single",
+        sid, query, (ev) => onEvent(id, ev),
+        controller.signal, collabMode ? "collab" : "single",
       );
     } catch (e) {
-      // AbortError is expected when user switches sessions mid-stream
       const isAbort = e instanceof DOMException && e.name === "AbortError";
       if (!isAbort) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -336,17 +417,45 @@ export function useChatStore() {
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
       setRunning(false);
-      api.listSessions().then(setSessions).catch(() => {});
+      // Refresh list (bumps updated_at) then attempt auto-title
+      await refreshSessions();
+      tryAutoTitle(sid);
     }
-  }, [running, collabMode, ensureSession, onEvent]);
+  }, [running, collabMode, ensureSession, onEvent, refreshSessions, tryAutoTitle]);
+
+  // ── derived: visible session list (search + tag filter) ─────────────
+  const allTags = useMemo(() => {
+    const s = new Set<string>();
+    for (const sess of sessions) {
+      for (const t of sess.tags || []) s.add(t);
+    }
+    return Array.from(s).sort();
+  }, [sessions]);
+
+  const visibleSessions = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return sessions.filter((s) => {
+      if (q && !s.title.toLowerCase().includes(q)) return false;
+      if (tagFilter && !(s.tags || []).includes(tagFilter)) return false;
+      return true;
+    });
+  }, [sessions, searchQuery, tagFilter]);
 
   return {
     // state
-    sessions, activeId, history, turns, running, info, me, authError,
-    collabMode,
+    sessions, visibleSessions, deletedSessions, allTags,
+    activeId, history, turns, running,
+    info, me, authError,
+    collabMode, sidebarCollapsed,
+    searchQuery, tagFilter,
     // actions
     setActiveId, setCollabMode,
-    newSession, deleteSession, renameSession, submit,
+    setSidebarCollapsed, toggleSidebarCollapsed,
+    setSearchQuery, setTagFilter,
+    newSession, deleteSession, renameSession,
+    restoreSession, purgeSession, refreshDeleted,
+    setPinned, setTags,
+    submit,
   };
 }
 
