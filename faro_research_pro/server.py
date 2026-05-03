@@ -60,8 +60,45 @@ def _brand_from_env() -> BrandConfig:
     )
 
 
+def _enable_sqlite_wal() -> None:
+    """Force WAL + per-connection busy_timeout on the shared SQLite file.
+
+    OSS' SessionStore and Pro's create separate engines pointing at the
+    same file. Without WAL, simultaneous writes (e.g. OSS audit log +
+    Pro append_message in the SSE finally block) deadlock with
+    "database is locked". WAL is a persistent file-level setting; the
+    SQLAlchemy `connect` listener applies busy_timeout to every new
+    connection regardless of which engine created it.
+    """
+    import sqlite3
+    from faro_research.config import settings
+    from sqlalchemy import event
+    from sqlalchemy.engine import Engine
+
+    path = settings.db_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        con = sqlite3.connect(str(path), timeout=10)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
+        con.commit()
+        con.close()
+    except Exception as e:
+        log.warning("failed to enable SQLite WAL on %s: %s", path, e)
+
+    @event.listens_for(Engine, "connect")
+    def _set_sqlite_pragma(dbapi_conn, _conn_record):
+        if not isinstance(dbapi_conn, sqlite3.Connection):
+            return
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA busy_timeout=5000")
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.close()
+
+
 def make_app():
     """Return a FastAPI app that mounts OSS routes + Pro extensions."""
+    _enable_sqlite_wal()
     app = _oss_make_app()
     provider = make_provider()
     store = SessionStore()
