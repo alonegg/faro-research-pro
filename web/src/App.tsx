@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { toast } from "sonner";
 import {
   api,
   askStream,
@@ -284,10 +286,22 @@ export function App() {
   };
 
   const deleteSession = async (id: string) => {
-    if (!confirm("删除这个会话?")) return;
-    await api.deleteSession(id);
-    setSessions((prev) => prev.filter((s) => s.id !== id));
-    if (activeId === id) setActiveId(null);
+    toast(`删除这个会话?`, {
+      action: {
+        label: "删除",
+        onClick: async () => {
+          try {
+            await api.deleteSession(id);
+            setSessions((prev) => prev.filter((s) => s.id !== id));
+            if (activeId === id) setActiveId(null);
+            toast.success("已删除");
+          } catch (e) {
+            toast.error(`删除失败: ${e}`);
+          }
+        },
+      },
+      duration: 6000,
+    });
   };
 
   // ── render ────────────────────────────────────────────────────────
@@ -385,11 +399,15 @@ export function App() {
             <button
               className="btn btn--ghost"
               style={{ fontSize: 11, padding: "3px 8px" }}
-              onClick={() => {
-                if (!confirm("退出当前 API key?")) return;
-                setApiKey("");
-                location.reload();
-              }}
+              onClick={() =>
+                toast("退出当前 API key?", {
+                  action: {
+                    label: "退出",
+                    onClick: () => { setApiKey(""); location.reload(); },
+                  },
+                  duration: 6000,
+                })
+              }
             >退出</button>
           )}
         </header>
@@ -415,8 +433,20 @@ export function App() {
             <PersistedMessageView key={m.seq} m={m} sessionId={activeId} />
           ))}
 
-          {/* Live turns */}
-          {turns.map((t) => <TurnView key={t.id} turn={t} sessionId={activeId} />)}
+          {/* Live turns — fade-in on append */}
+          <AnimatePresence initial={false}>
+            {turns.map((t) => (
+              <motion.div
+                key={t.id}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+              >
+                <TurnView turn={t} sessionId={activeId} />
+              </motion.div>
+            ))}
+          </AnimatePresence>
         </div>
 
         <div className="composer">
@@ -458,12 +488,24 @@ function ExportButtons({ sessionId }: { sessionId: string | null }) {
       <button
         className="btn btn--ghost"
         style={{ fontSize: 11, padding: "3px 8px" }}
-        onClick={() => api.download(sessionId, "md").catch((e) => alert(`导出失败: ${e}`))}
+        onClick={() =>
+          toast.promise(api.download(sessionId, "md"), {
+            loading: "正在导出 Markdown…",
+            success: "已下载 Markdown",
+            error: (e) => `导出失败: ${e}`,
+          })
+        }
       >下载 Markdown</button>
       <button
         className="btn btn--ghost"
         style={{ fontSize: 11, padding: "3px 8px" }}
-        onClick={() => api.download(sessionId, "pdf").catch((e) => alert(`导出失败: ${e}`))}
+        onClick={() =>
+          toast.promise(api.download(sessionId, "pdf"), {
+            loading: "正在生成品牌 PDF…",
+            success: "已下载 PDF",
+            error: (e) => `导出失败: ${e}`,
+          })
+        }
       >下载 PDF</button>
     </div>
   );
@@ -508,16 +550,26 @@ function PersistedMessageView({ m, sessionId }: { m: PersistedMessage; sessionId
 function PhaseTag({ phase, round, status }: PhaseEvent) {
   const label = phase === "researcher" ? "Researcher" : "Risk Reviewer";
   return (
-    <div className={`phase-tag phase-tag--${phase}`}>
+    <motion.div
+      className={`phase-tag phase-tag--${phase}`}
+      initial={{ opacity: 0, y: -4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.18, ease: "easeOut" }}
+    >
       <span className="dot" />
       {label} · 第 {round} 轮{status === "running" ? "（运行中）" : ""}
-    </div>
+    </motion.div>
   );
 }
 
 function ReviewCard({ review }: { review: ReviewVerdict }) {
   return (
-    <div className={`review-card review-card--${review.verdict}`}>
+    <motion.div
+      className={`review-card review-card--${review.verdict}`}
+      initial={{ opacity: 0, scale: 0.97 }}
+      animate={{ opacity: 1, scale: 1 }}
+      transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+    >
       <div className="verdict">
         {review.verdict === "approve" ? "✓ 通过" : "↺ 退回修改"}
         <span style={{ marginLeft: 8, color: "var(--ink-3)", fontWeight: 500 }}>
@@ -535,7 +587,7 @@ function ReviewCard({ review }: { review: ReviewVerdict }) {
           )}
         </ul>
       )}
-    </div>
+    </motion.div>
   );
 }
 
@@ -575,7 +627,14 @@ function TurnView({ turn, sessionId }: { turn: UITurn; sessionId: string | null 
       )}
       {turn.status === "done" && turn.finalAnswer && (
         <>
-          <div className="assistant-card"><Markdown text={turn.finalAnswer} /></div>
+          <motion.div
+            className="assistant-card"
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+          >
+            <Markdown text={turn.finalAnswer} />
+          </motion.div>
           <div className="run-meta">
             {turn.collab && turn.rounds && <span>{turn.rounds} 轮协作</span>}
             <span>{turn.finalToolCalls?.length ?? 0} tool calls</span>
