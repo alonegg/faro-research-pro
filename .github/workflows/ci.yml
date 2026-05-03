@@ -30,7 +30,11 @@ jobs:
       - name: Install package (server + dev extras)
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[server,dev]"
+          # OSS faro-research isn't on PyPI yet; install from GitHub then Pro
+          # with --no-deps so pip doesn't try to re-resolve it.
+          pip install "faro-research[server,export] @ git+https://github.com/alonegg/faro-research.git@main"
+          pip install --no-deps -e ".[server,dev]"
+          pip install xhtml2pdf httpx ruff pytest
 
       - name: Ruff lint
         run: ruff check faro_research_pro
