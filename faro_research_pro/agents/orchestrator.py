@@ -99,13 +99,20 @@ def stream_collab(
             draft = ""
             for ev in researcher.stream(current_history):
                 if ev["type"] == "final":
+                    # Capture the draft; DO NOT forward this inner-loop final
+                    # to the client — the client treats `final` as "session
+                    # complete", which would prematurely mark the turn done
+                    # and hide the upcoming reviewer phase.
                     draft = ev["answer"]
                     tool_calls.extend(ev.get("tool_calls") or [])
-                elif ev["type"] == "error":
-                    last_error = ev["message"]
-                yield ev
-                if ev["type"] in ("final", "error"):
                     break
+                if ev["type"] == "error":
+                    last_error = ev["message"]
+                    yield ev
+                    break
+                # All other inner events (turn_start, tool_call, tool_result)
+                # are passed through verbatim so the UI shows live progress.
+                yield ev
             if last_error:
                 break
             drafts.append(draft)
