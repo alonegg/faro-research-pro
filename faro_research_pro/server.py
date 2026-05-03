@@ -32,15 +32,38 @@ from faro_research.audit import SessionStore
 from faro_research.auth import User
 from faro_research.export import session_to_markdown
 from faro_research.providers import make_provider
+from faro_research.providers.base import Message
 from faro_research.server.app import make_app as _oss_make_app
-from fastapi import Body, Depends, HTTPException
+from fastapi import Body, Depends, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
 
 from faro_research_pro import __version__ as pro_version
 from faro_research_pro.agents import stream_collab
 from faro_research_pro.exports import BrandConfig, branded_markdown_to_pdf
+from faro_research_pro.storage import metadata_store
 
 log = logging.getLogger(__name__)
+
+
+def _make_small_provider():
+    """Build a separate, cheap provider for meta tasks (auto-title, etc.).
+
+    Falls back to the main provider if FARO_PRO_SMALL_LLM_* env not set.
+    Using the main reasoning model (MiniMax-M2.7 / DeepSeek-R1) for an
+    8-character title burns 5K reasoning tokens and takes 30s — wrong
+    tool for the job.
+    """
+    base = os.getenv("FARO_PRO_SMALL_LLM_BASE_URL", "").strip()
+    key = os.getenv("FARO_PRO_SMALL_LLM_API_KEY", "").strip()
+    model = os.getenv("FARO_PRO_SMALL_LLM_MODEL", "").strip()
+    if not (base and key and model):
+        return None
+    # Reuse OSS' OpenAI-compat provider with overridden settings.
+    from faro_research.providers.openai_compat import OpenAICompatibleProvider
+    return OpenAICompatibleProvider(
+        base_url=base, api_key=key, model=model,
+        timeout=30.0,
+    )
 
 
 def _brand_from_env() -> BrandConfig:
@@ -101,6 +124,7 @@ def make_app():
     _enable_sqlite_wal()
     app = _oss_make_app()
     provider = make_provider()
+    small_provider = _make_small_provider()  # None → fall back to main
     store = SessionStore()
     brand = _brand_from_env()
 
@@ -286,6 +310,153 @@ def make_app():
             content=pdf, media_type="application/pdf",
             headers={"content-disposition": cd},
         )
+
+    # ── Session metadata: pinned / tags / soft-delete / auto-title ────
+    # All under /api/pro/sessions/* — Pro frontend uses these instead of
+    # the OSS list/delete endpoints. OSS endpoints still work for
+    # backward compat (single-agent CLI etc.).
+    meta = metadata_store()
+
+    def _serialize(s, m) -> dict:
+        return {
+            "id": s.id,
+            "title": s.title,
+            "created_at": s.created_at.isoformat() if hasattr(s.created_at, "isoformat") else s.created_at,
+            "updated_at": s.updated_at.isoformat() if hasattr(s.updated_at, "isoformat") else s.updated_at,
+            "pinned": (m.pinned if m else False),
+            "pinned_at": (m.pinned_at.isoformat() if (m and m.pinned_at) else None),
+            "tags": (m.tags if m else []),
+            "deleted_at": (m.deleted_at.isoformat() if (m and m.deleted_at) else None),
+            "auto_titled": (m.auto_titled if m else False),
+        }
+
+    @app.get("/api/pro/sessions")
+    def list_sessions_pro(
+        include_deleted: bool = Query(False),
+        only_deleted: bool = Query(False),
+        user: User = Depends(_current_user_dep),
+    ) -> list[dict]:
+        """List sessions joined with Pro metadata (pinned/tags/deleted)."""
+        rows = store.list_sessions(limit=500, user_id=user.id)
+        meta_map = meta.list_by_session_ids([r.id for r in rows])
+        out = []
+        for s in rows:
+            m = meta_map.get(s.id)
+            is_deleted = bool(m and m.deleted_at)
+            if only_deleted and not is_deleted:
+                continue
+            if not only_deleted and not include_deleted and is_deleted:
+                continue
+            out.append(_serialize(s, m))
+        return out
+
+    @app.patch("/api/pro/sessions/{session_id}/metadata")
+    def patch_metadata(
+        session_id: str,
+        body: dict = Body(...),
+        user: User = Depends(_current_user_dep),
+    ) -> dict:
+        if not store.get_session(session_id, user_id=user.id):
+            raise HTTPException(404, f"session {session_id} not found")
+        if "pinned" in body:
+            meta.set_pinned(session_id, bool(body["pinned"]))
+        if "tags" in body:
+            tags = body["tags"]
+            if not isinstance(tags, list):
+                raise HTTPException(400, "tags must be a list of strings")
+            meta.set_tags(session_id, [str(t) for t in tags])
+        m = meta.get(session_id)
+        s = store.get_session(session_id)
+        return _serialize(s, m)
+
+    @app.delete("/api/pro/sessions/{session_id}")
+    def soft_delete_pro(
+        session_id: str,
+        user: User = Depends(_current_user_dep),
+    ) -> dict:
+        """Soft-delete: tombstone in pro_session_metadata; OSS row stays."""
+        if not store.get_session(session_id, user_id=user.id):
+            raise HTTPException(404, f"session {session_id} not found")
+        m = meta.soft_delete(session_id)
+        return {"soft_deleted": session_id, "deleted_at": m.deleted_at.isoformat()}
+
+    @app.post("/api/pro/sessions/{session_id}/restore")
+    def restore_pro(
+        session_id: str,
+        user: User = Depends(_current_user_dep),
+    ) -> dict:
+        if not store.get_session(session_id, user_id=user.id):
+            raise HTTPException(404, f"session {session_id} not found")
+        m = meta.restore(session_id)
+        if m is None:
+            raise HTTPException(404, "no metadata for that session")
+        return _serialize(store.get_session(session_id), m)
+
+    @app.delete("/api/pro/sessions/{session_id}/purge")
+    def purge_pro(
+        session_id: str,
+        user: User = Depends(_current_user_dep),
+    ) -> dict:
+        """Actually drop the session (OSS row + Pro metadata)."""
+        if not store.get_session(session_id, user_id=user.id):
+            raise HTTPException(404, f"session {session_id} not found")
+        meta.purge(session_id)
+        store.delete_session(session_id)
+        return {"purged": session_id}
+
+    @app.post("/api/pro/sessions/{session_id}/auto-title")
+    def auto_title_pro(
+        session_id: str,
+        user: User = Depends(_current_user_dep),
+    ) -> dict:
+        """Generate a 6-10 char title from the first user message via LLM.
+        Idempotent — if already auto-titled, returns the current title."""
+        if not store.get_session(session_id, user_id=user.id):
+            raise HTTPException(404, f"session {session_id} not found")
+        m = meta.get(session_id)
+        if m and m.auto_titled:
+            return {"title": store.get_session(session_id).title, "skipped": "already-titled"}
+        msgs = store.list_messages(session_id)
+        first_user = next((x for x in msgs if x.role == "user"), None)
+        if first_user is None:
+            raise HTTPException(400, "no user messages yet")
+        few_shot = (
+            "Examples:\n"
+            "Q: 帮我分析下宁德时代的最新季报和未来增长点\n"
+            "A: 宁德时代季报与增长分析\n\n"
+            "Q: 比亚迪 2024 vs 2025 的营收同比怎么样\n"
+            "A: 比亚迪营收同比对比\n\n"
+            "Q: 给我写一份茅台的 DCF 估值报告\n"
+            "A: 茅台 DCF 估值报告\n\n"
+            f"Q: {first_user.content[:300]}\n"
+            "A:"
+        )
+        # Use the small/fast provider when configured — main reasoning
+        # model burns 5K thinking tokens for an 8-char title.
+        title_provider = small_provider or provider
+        try:
+            # Big budget tolerates reasoning models; small models barely use it.
+            resp = title_provider.chat(
+                [Message(role="user", content=few_shot)],
+                temperature=0.2, max_tokens=1024,
+            )
+            raw = (resp.content or "").strip()
+            # Reasoning models sometimes still echo trailing trace —
+            # take the LAST non-empty line, which is usually the final answer.
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            raw = lines[-1] if lines else ""
+            for prefix in ("A:", "A：", "标题:", "标题：", "Title:", "title:",
+                           "答:", "答：", "**A:**", "**Title:**"):
+                if raw.startswith(prefix):
+                    raw = raw[len(prefix):].lstrip()
+            title = raw.strip("\"'`「」《》【】 ").rstrip("。.!?")[:40] or "新会话"
+        except Exception as e:
+            log.warning("auto_title failed for %s: %s", session_id, e)
+            raise HTTPException(500, f"LLM auto-title failed: {e}") from e
+        store.rename_session(session_id, title)
+        meta.mark_auto_titled(session_id)
+        s = store.get_session(session_id)
+        return _serialize(s, meta.get(session_id))
 
     return app
 
