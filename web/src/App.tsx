@@ -115,15 +115,27 @@ export function App() {
   }, []);
 
   // ── load active session messages ──────────────────────────────────
+  // IMPORTANT: only wipe `turns` when *switching* sessions, never when
+  // activeId first becomes set inside the same submit() call. Otherwise
+  // ensureSession() → setActiveId() → this effect → setTurns([]) races
+  // with the pending turn we just inserted, and the user sees nothing.
+  const lastLoadedSession = useRef<string | null>(null);
   useEffect(() => {
     if (!activeId) {
       setHistory([]);
-      setTurns([]);
+      // Only clear turns if we previously had a session (i.e. user
+      // navigated *away* from one). On initial mount we have nothing
+      // to clear.
+      if (lastLoadedSession.current) setTurns([]);
+      lastLoadedSession.current = null;
       return;
     }
+    const switched = lastLoadedSession.current !== null
+                     && lastLoadedSession.current !== activeId;
+    lastLoadedSession.current = activeId;
     api.getSession(activeId).then((d) => {
       setHistory(d.messages);
-      setTurns([]);  // live turns stay empty for a freshly opened session
+      if (switched) setTurns([]);  // only on real session switch
     }).catch(() => {});
   }, [activeId]);
 
