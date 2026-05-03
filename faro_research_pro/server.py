@@ -128,12 +128,9 @@ def make_app():
         if not store.get_session(session_id, user_id=user.id):
             raise HTTPException(404, f"session {session_id} not found")
 
-        # Reach into the OSS app's per-user agent cache (it's an attribute
-        # we know exists; defensive lookup).
-        cache = None
-        for handler in getattr(app.router, "dependency_overrides_provider", []) or []:
-            pass
-        # Simpler: rebuild the agent here using OSS factories
+        # Rebuild the agent here using OSS factories — same shape as OSS' own
+        # per-user agent cache, just inline. Pro shares memory dir layout
+        # with OSS, so a user's notes are reachable from single + collab modes.
         from faro_research.agent import Agent, Message, build_system_prompt
         from faro_research.config import settings
         from faro_research.memory import MemoryStore, make_memory_tools
