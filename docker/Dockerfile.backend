@@ -9,13 +9,19 @@ WORKDIR /app
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         build-essential pkg-config libcairo2-dev libpango1.0-dev \
+        git \
  && rm -rf /var/lib/apt/lists/*
 
-# Install Pro (which pulls faro-research>=0.4.0 from PyPI)
 COPY pyproject.toml README.md LICENSE ./
 COPY faro_research_pro ./faro_research_pro
 
-RUN pip install --no-cache-dir -e ".[server]"
+# OSS faro-research isn't on PyPI yet; install from GitHub first (with its
+# server+export extras), then install Pro on top with --no-deps so pip
+# doesn't try to re-resolve faro-research from PyPI.
+RUN pip install --no-cache-dir \
+        "faro-research[server,export] @ git+https://github.com/alonegg/faro-research.git@main" \
+ && pip install --no-cache-dir --no-deps -e ".[server]" \
+ && pip install --no-cache-dir xhtml2pdf httpx
 
 # Persisted state lands here (mounted as volume in compose)
 RUN mkdir -p /app/data
