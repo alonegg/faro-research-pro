@@ -15,21 +15,23 @@ import { AuthSection } from "./sections/Auth";
 import { AuditSection } from "./sections/Audit";
 import { ShortcutsSection } from "./sections/Shortcuts";
 import { AppearanceSection } from "./sections/Appearance";
+import { UsersSection } from "./sections/Users";
 
-const TABS = [
-  { id: "llm", label: "LLM 模型", icon: "🧠" },
-  { id: "data", label: "数据源", icon: "📊" },
-  { id: "agent", label: "Agent 行为", icon: "🤖" },
-  { id: "sessions", label: "会话默认", icon: "💬" },
-  { id: "brand", label: "品牌 / PDF", icon: "🎨" },
-  { id: "memory", label: "Memory & Skills", icon: "🧬" },
-  { id: "auth", label: "认证", icon: "🔐" },
-  { id: "audit", label: "审计 / 隐私", icon: "🛡️" },
-  { id: "shortcuts", label: "快捷键", icon: "⌨️" },
-  { id: "appearance", label: "外观", icon: "✨" },
+const ALL_TABS = [
+  { id: "llm", label: "LLM 模型", icon: "🧠", adminOnly: false },
+  { id: "data", label: "数据源", icon: "📊", adminOnly: false },
+  { id: "agent", label: "Agent 行为", icon: "🤖", adminOnly: false },
+  { id: "sessions", label: "会话默认", icon: "💬", adminOnly: false },
+  { id: "brand", label: "品牌 / PDF", icon: "🎨", adminOnly: false },
+  { id: "memory", label: "Memory & Skills", icon: "🧬", adminOnly: false },
+  { id: "users", label: "用户管理", icon: "👥", adminOnly: true },
+  { id: "auth", label: "认证", icon: "🔐", adminOnly: false },
+  { id: "audit", label: "审计 / 隐私", icon: "🛡️", adminOnly: false },
+  { id: "shortcuts", label: "快捷键", icon: "⌨️", adminOnly: false },
+  { id: "appearance", label: "外观", icon: "✨", adminOnly: false },
 ] as const;
 
-type TabId = typeof TABS[number]["id"];
+type TabId = typeof ALL_TABS[number]["id"];
 
 interface Props {
   open: boolean;
@@ -39,6 +41,8 @@ interface Props {
 export function SettingsModal({ open, onClose }: Props) {
   const [tab, setTab] = useState<TabId>("llm");
   const s = useSettings(open);
+  const isAdmin = s.status?.auth.current_user.role === "admin";
+  const TABS = ALL_TABS.filter((t) => !t.adminOnly || isAdmin);
 
   // Esc closes
   useEffect(() => {
@@ -108,6 +112,7 @@ export function SettingsModal({ open, onClose }: Props) {
                         onUpdateMemory={s.updateMemory}
                       />
                     )}
+                    {tab === "users" && isAdmin && <UsersSection />}
                     {tab === "auth" && <AuthSection status={s.status} />}
                     {tab === "audit" && <AuditSection status={s.status} settings={s.settings} onUpdate={s.update} />}
                     {tab === "shortcuts" && <ShortcutsSection />}

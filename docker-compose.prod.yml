@@ -1,0 +1,49 @@
+# VPS production overlay — adds Caddy with automatic HTTPS.
+#
+# Usage:
+#   1. Point your domain (A record) at the VPS public IP
+#   2. Set FARO_DOMAIN + FARO_ADMIN_EMAIL in .env (used by Caddy for ACME)
+#   3. docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#   4. Caddy auto-fetches a Let's Encrypt cert; HTTPS in ~30s
+#   5. Open https://<your-domain>/ — paste your FARO_ADMIN_KEY
+#
+# What this overlay changes:
+#   - `web` container no longer publishes port 5174 to the host directly.
+#     It only exposes port 80 inside the docker network.
+#   - `caddy` reverse-proxies https://<domain>/ → web:80 with auto-HTTPS.
+#   - Persistent named volumes for Caddy's cert + config.
+
+services:
+  backend:
+    environment:
+      # Tighten CORS to the production domain.
+      FARO_CORS_ORIGINS: "https://${FARO_DOMAIN}"
+      # Force auth ON in production.
+      FARO_AUTH_REQUIRED: "1"
+
+  web:
+    # Remove the host port mapping inherited from base compose.
+    ports: !reset []
+    expose:
+      - "80"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    environment:
+      FARO_DOMAIN: ${FARO_DOMAIN}
+      FARO_ADMIN_EMAIL: ${FARO_ADMIN_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -649,6 +649,106 @@ def make_app():
                 pass
         return {"purged": purged}
 
+    # ── Multi-user management (admin only) ───────────────────────────
+    def _admin_required(user: User = Depends(_current_user_dep)) -> User:
+        if user.role != "admin":
+            raise HTTPException(403, "admin role required")
+        return user
+
+    def _user_summary(u: User) -> dict:
+        sessions_count = len(store.list_sessions(limit=10000, user_id=u.id))
+        return {
+            "id": u.id,
+            "email": u.email,
+            "role": u.role,
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+            "last_seen_at": u.last_seen_at.isoformat() if u.last_seen_at else None,
+            "sessions_count": sessions_count,
+        }
+
+    @app.get("/api/pro/users")
+    def list_users_admin(
+        admin: User = Depends(_admin_required),
+    ) -> list[dict]:
+        return [_user_summary(u) for u in us.list_users()]
+
+    @app.post("/api/pro/users")
+    def create_user_admin(
+        body: dict = Body(...),
+        admin: User = Depends(_admin_required),
+    ) -> dict:
+        email = (body or {}).get("email", "").strip()
+        role = (body or {}).get("role", "user")
+        if not email:
+            raise HTTPException(400, "email is required")
+        if role not in ("user", "admin"):
+            raise HTTPException(400, "role must be 'user' or 'admin'")
+        try:
+            new_user, plain_key = us.create_user(email=email, role=role)
+        except Exception as e:
+            raise HTTPException(400, f"create_user failed: {e}") from e
+        return {**_user_summary(new_user), "plain_key": plain_key}
+
+    @app.delete("/api/pro/users/{user_id}")
+    def delete_user_admin(
+        user_id: str,
+        admin: User = Depends(_admin_required),
+    ) -> dict:
+        if user_id == admin.id:
+            raise HTTPException(400, "you can't delete yourself")
+        if user_id == "default":
+            raise HTTPException(400, "the default user can't be deleted")
+        target = us.get(user_id)
+        if target is None:
+            raise HTTPException(404, "user not found")
+        # Delete the user's sessions + Pro metadata + memory dir
+        for s in store.list_sessions(limit=10000, user_id=user_id):
+            try:
+                meta.purge(s.id)
+                store.delete_session(s.id)
+            except Exception as e:
+                log.warning("failed to purge session %s during user delete: %s", s.id, e)
+        # Memory dir
+        try:
+            import shutil
+            mem_dir = faro_settings_module().db_path.parent / "memory" / user_id
+            if mem_dir.exists():
+                shutil.rmtree(mem_dir)
+        except Exception as e:
+            log.warning("failed to remove memory dir for user %s: %s", user_id, e)
+        # The user row itself
+        from sqlmodel import Session
+        with Session(us.engine) as db:
+            row = db.get(User, user_id)
+            if row is not None:
+                db.delete(row)
+                db.commit()
+        return {"deleted": user_id}
+
+    @app.post("/api/pro/users/{user_id}/regenerate_key")
+    def regenerate_user_key(
+        user_id: str,
+        admin: User = Depends(_admin_required),
+    ) -> dict:
+        target = us.get(user_id)
+        if target is None:
+            raise HTTPException(404, "user not found")
+        if user_id == "default":
+            raise HTTPException(400, "the default user has no usable key")
+        # Make a fresh random key + update hash in place.
+        from faro_research.auth import hash_api_key
+        import secrets
+        plain = "fr-" + secrets.token_urlsafe(28)
+        new_hash = hash_api_key(plain)
+        from sqlmodel import Session
+        with Session(us.engine) as db:
+            row = db.get(User, user_id)
+            row.api_key_hash = new_hash
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+        return {**_user_summary(row), "plain_key": plain}
+
     return app
 
 

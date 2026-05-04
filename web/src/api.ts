@@ -43,6 +43,15 @@ export interface ToolInfo {
   parameters: Record<string, unknown>;
 }
 
+export interface UserSummary {
+  id: string;
+  email: string;
+  role: "user" | "admin";
+  created_at: string;
+  last_seen_at: string | null;
+  sessions_count: number;
+}
+
 // Settings
 export interface SettingsStatus {
   llm_main: { provider: string; base_url: string; api_key_masked: string; model: string; timeout_sec: number };
@@ -205,6 +214,20 @@ export const api = {
     ),
   purgeAllSessions: () =>
     jpost<{ purged: number }>(`/pro/settings/purge_all_sessions`, {}),
+  // ── Multi-user admin ────────────────────────────────────────────────
+  listUsersAdmin: () => jget<UserSummary[]>("/pro/users"),
+  createUserAdmin: (email: string, role: "user" | "admin" = "user") =>
+    jpost<UserSummary & { plain_key: string }>("/pro/users", { email, role }),
+  deleteUserAdmin: (id: string) =>
+    fetch(`/api/pro/users/${id}`, { method: "DELETE", headers: authHeaders() })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+        return r.json();
+      }),
+  regenerateUserKey: (id: string) =>
+    jpost<UserSummary & { plain_key: string }>(
+      `/pro/users/${id}/regenerate_key`, {},
+    ),
   /** Triggers a browser download. Returns the URL we'd hit (useful for a tags). */
   exportUrl: (id: string, fmt: "md" | "pdf") => `/api/sessions/${id}/export.${fmt}`,
   download: async (id: string, fmt: "md" | "pdf") => {

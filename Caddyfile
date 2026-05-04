@@ -1,0 +1,37 @@
+# Caddy auto-HTTPS reverse proxy for Faro Research Pro.
+# Reads FARO_DOMAIN + FARO_ADMIN_EMAIL from env (set by docker-compose.prod.yml).
+
+{
+    email {$FARO_ADMIN_EMAIL}
+    # Uncomment for ACME staging when testing (avoids LE rate limits):
+    # acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{$FARO_DOMAIN} {
+    encode zstd gzip
+
+    # Static frontend + API proxy live behind the same domain.
+    reverse_proxy web:80 {
+        # Pass through SSE / streaming headers.
+        flush_interval -1
+    }
+
+    # Security headers — defense in depth.
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Frame-Options DENY
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+        # Allow inline scripts / images from data: URLs (markdown PDF previews).
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; font-src 'self' data:;"
+    }
+
+    # Optional: rate-limit auth attempts (uncomment + restart):
+    # rate_limit {
+    #     zone auth_failures {
+    #         match path /api/auth/*
+    #         events 30
+    #         window 1m
+    #     }
+    # }
+}

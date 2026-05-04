@@ -846,6 +846,81 @@ input, textarea { font-family: inherit; font-size: inherit; color: inherit; }
   border-color: var(--accent);
 }
 
+/* Users table */
+.users-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.users-table th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--divider);
+}
+.users-table td {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--divider);
+  vertical-align: middle;
+}
+.users-table tr:last-child td { border-bottom: none; }
+.users-table__email { font-weight: 500; }
+.users-table__id {
+  font-size: 10px; color: var(--ink-3);
+  font-family: ui-monospace, monospace;
+  margin-top: 2px;
+}
+.users-table__time { color: var(--ink-3); font-size: 11px; }
+.users-table__actions {
+  display: flex; gap: 4px;
+  justify-content: flex-end;
+}
+.role-pill {
+  display: inline-block;
+  padding: 1px 8px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 600;
+}
+.role-pill--admin { background: var(--accent-soft); color: var(--accent); }
+.role-pill--user { background: var(--surface-2); color: var(--ink-2); }
+
+/* Create-user / revealed-key modals */
+.user-modal-overlay {
+  position: fixed; inset: 0;
+  background: rgba(15, 12, 8, 0.5);
+  display: grid; place-items: center;
+  z-index: 110;
+  padding: 32px;
+}
+.user-modal {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  width: 100%; max-width: 480px;
+  box-shadow: var(--shadow-3);
+  display: flex; flex-direction: column; gap: 12px;
+}
+.user-modal h3 {
+  margin: 0; font-size: 16px;
+}
+.key-display {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.key-display code {
+  flex: 1;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  color: var(--ink-1);
+}
+
 /* Shortcuts table */
 .shortcuts-table {
   width: 100%;
