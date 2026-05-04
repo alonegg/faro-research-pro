@@ -57,7 +57,7 @@ export function useChatStore() {
   const abortRef = useRef<AbortController | null>(null);
   // Sessions where the next done-turn should trigger auto-title.
   // (Set when ensureSession lazily creates a new session in submit.)
-  const pendingAutoTitle = useRef<Set<string>>(new Set());
+  // (pendingAutoTitle ref removed — backend now decides via auto_titled flag)
 
   // ── persisted toggles ───────────────────────────────────────────────
   const setCollabMode = useCallback((on: boolean) => {
@@ -297,11 +297,19 @@ export function useChatStore() {
   }, [refreshSessions]);
 
   // ── auto-title trigger ──────────────────────────────────────────────
+  // Called after every successful turn. The backend has an idempotent
+  // guard (skips if already auto_titled), so re-fires on the 2nd/3rd
+  // turn cost a single ~10ms round trip and immediately return
+  // `{skipped: "already-titled"}`. We previously gated on a
+  // pendingAutoTitle ref + ensureSession's isNew flag, but that broke
+  // when the user clicked "+ 新会话" before submitting — activeId was
+  // already set, ensureSession returned isNew=false, and auto-title
+  // never fired. Letting the backend decide is simpler and bulletproof.
   const tryAutoTitle = useCallback(async (sessionId: string) => {
-    if (!pendingAutoTitle.current.has(sessionId)) return;
-    pendingAutoTitle.current.delete(sessionId);
     try {
       const updated = await api.autoTitle(sessionId);
+      // Skipped responses don't include the full session shape; ignore.
+      if ((updated as { skipped?: string }).skipped) return;
       setSessions((prev) => prev.map((s) =>
         s.id === sessionId ? { ...s, ...updated, auto_titled: true } : s,
       ));
@@ -379,18 +387,14 @@ export function useChatStore() {
     setRunning(true);
 
     let sid: string;
-    let isNew = false;
     try {
       const r = await ensureSession();
-      sid = r.sid; isNew = r.isNew;
+      sid = r.sid;
     } catch (e) {
       setRunning(false);
       toast.error(`新建会话失败: ${e}`);
       return;
     }
-
-    // Mark this session as eligible for auto-title (one-shot per session).
-    if (isNew) pendingAutoTitle.current.add(sid);
 
     const id = nextTurnId.current++;
     setTurns((prev) => [...prev, {
@@ -400,11 +404,13 @@ export function useChatStore() {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    let succeeded = false;
     try {
       await askStream(
         sid, query, (ev) => onEvent(id, ev),
         controller.signal, collabMode ? "collab" : "single",
       );
+      succeeded = true;
     } catch (e) {
       const isAbort = e instanceof DOMException && e.name === "AbortError";
       if (!isAbort) {
@@ -417,9 +423,11 @@ export function useChatStore() {
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
       setRunning(false);
-      // Refresh list (bumps updated_at) then attempt auto-title
+      // Refresh list (bumps updated_at) then attempt auto-title.
+      // Only fire on successful turns — aborted streams shouldn't
+      // trigger a title for a session the user is leaving.
       await refreshSessions();
-      tryAutoTitle(sid);
+      if (succeeded) tryAutoTitle(sid);
     }
   }, [running, collabMode, ensureSession, onEvent, refreshSessions, tryAutoTitle]);
 
