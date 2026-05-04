@@ -50,6 +50,9 @@ export function useChatStore() {
   );
   const [searchQuery, setSearchQuery] = useState("");
   const [tagFilter, setTagFilter] = useState<string | null>(null);
+  // Evidence rail (right slide-in panel for tool-call sources)
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
+  const [evidenceHighlight, setEvidenceHighlight] = useState<number | null>(null);
 
   const nextTurnId = useRef(1);
   const tickRef = useRef<number | null>(null);
@@ -449,6 +452,17 @@ export function useChatStore() {
     });
   }, [sessions, searchQuery, tagFilter]);
 
+  // Evidence rail: open + highlight a citation marker
+  const showEvidence = useCallback((cite?: number | null) => {
+    setEvidenceOpen(true);
+    if (cite != null) {
+      setEvidenceHighlight(cite);
+      window.setTimeout(() => setEvidenceHighlight(null), 2000);
+    }
+  }, []);
+  const closeEvidence = useCallback(() => setEvidenceOpen(false), []);
+  const toggleEvidence = useCallback(() => setEvidenceOpen((o) => !o), []);
+
   return {
     // state
     sessions, visibleSessions, deletedSessions, allTags,
@@ -456,6 +470,7 @@ export function useChatStore() {
     info, me, authError,
     collabMode, sidebarCollapsed,
     searchQuery, tagFilter,
+    evidenceOpen, evidenceHighlight,
     // actions
     setActiveId, setCollabMode,
     setSidebarCollapsed, toggleSidebarCollapsed,
@@ -464,6 +479,7 @@ export function useChatStore() {
     restoreSession, purgeSession, refreshDeleted,
     setPinned, setTags,
     submit,
+    showEvidence, closeEvidence, toggleEvidence,
   };
 }
 

@@ -1,70 +1,96 @@
-/** ChatGPT-style composer: auto-resizing textarea (up to 8 lines), send
- *  button on the right, ⌘/Ctrl+Enter hint underneath. */
+/** Editorial composer — auto-grow textarea + send circle + footer
+ *  with collab/Tushare/Memory pill toggles + ⌘+Enter hint. */
 
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { Button } from "../ui/Button";
-import { Kbd } from "../ui/Kbd";
+import { I } from "../ui/Icon";
 
 interface ComposerProps {
   running: boolean;
+  collabMode: boolean;
+  onToggleCollab: () => void;
   onSubmit: (q: string) => void;
 }
 
-export function Composer({ running, onSubmit }: ComposerProps) {
+export function Composer({ running, collabMode, onToggleCollab, onSubmit }: ComposerProps) {
   const [value, setValue] = useState("");
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const taRef = useRef<HTMLTextAreaElement>(null);
 
-  // Auto-resize: shrink to content height, capped by max-height in CSS
   useEffect(() => {
-    const ta = textareaRef.current;
+    const ta = taRef.current;
     if (!ta) return;
     ta.style.height = "auto";
-    ta.style.height = `${ta.scrollHeight}px`;
+    ta.style.height = Math.min(192, Math.max(22, ta.scrollHeight)) + "px";
   }, [value]);
 
-  const submit = () => {
+  const send = () => {
     if (running || !value.trim()) return;
-    onSubmit(value);
+    onSubmit(value.trim());
     setValue("");
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
-      submit();
+      send();
     }
   };
 
   return (
     <div className="composer-wrap">
       <div className="composer">
-        <div className="composer__field">
+        <div className="composer-textarea-wrap">
           <textarea
-            ref={textareaRef}
-            placeholder={running ? "等待中..." : "问个 A 股研究问题..."}
+            ref={taRef}
             value={value}
+            placeholder={collabMode
+              ? "用协作模式提问 — 多 Agent 会复核答案…"
+              : "提问以开始 — ⌘+Enter 发送"}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={onKeyDown}
-            disabled={running}
             rows={1}
           />
-          <Button
-            variant="primary"
-            size="md"
-            onClick={submit}
-            disabled={running || !value.trim()}
-            title="发送 (⌘/Ctrl + Enter)"
+          <button
+            className="send-btn"
+            disabled={!value.trim() || running}
+            onClick={send}
+            title="发送 (⌘+Enter)"
+            aria-label="发送"
           >
-            {running ? "⋯" : "发送"}
-          </Button>
+            {running ? (
+              <div
+                className="spinner"
+                style={{
+                  width: 12, height: 12,
+                  borderColor: "white", borderTopColor: "transparent",
+                }}
+              />
+            ) : (
+              <I.Send size={14} />
+            )}
+          </button>
         </div>
-        <div className="composer__hint">
-          <span>
-            数据：本地 SQLite 多会话历史 + Tushare（行情 / 三表 / 估值 / 高管交易）
-          </span>
-          <span>
-            <Kbd>⌘</Kbd>+<Kbd>Enter</Kbd> 发送
-          </span>
+        <div className="composer-footer">
+          <button
+            className={`composer-tool-btn ${collabMode ? "active" : ""}`}
+            onClick={onToggleCollab}
+            title="多 Agent 协作 (Researcher + Risk Reviewer)"
+          >
+            <I.Layers size={11} />
+            {collabMode ? "协作 · 双 Agent" : "单 Agent"}
+          </button>
+          <button className="composer-tool-btn" title="数据源: Tushare A 股 / 港股">
+            <I.Database size={11} />
+            Tushare
+          </button>
+          <button className="composer-tool-btn" title="个人偏好与规则">
+            <I.Brain size={11} />
+            Memory
+          </button>
+          <div className="composer-hint">
+            <span className="kbd">⌘</span>
+            <span className="kbd">Enter</span>
+            <span>发送</span>
+          </div>
         </div>
       </div>
     </div>
